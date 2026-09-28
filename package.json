@@ -1,0 +1,12 @@
+{
+  "name": "codex-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude(Opus)가 ChatGPT OAuth로 로그인된 Codex 모델(Luna, Sol 등)에게 일을 맡기는 MCP 서버",
+  "main": "server.mjs",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "zod": "^4.6.5"
+  }
+}
