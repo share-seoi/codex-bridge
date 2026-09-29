@@ -192,9 +192,16 @@ class CodexAppServer {
     if (method === 'account/rateLimits/updated') { this.rateLimits = params.rateLimits; return; }
     if (!task) return;
 
-    if (method === 'item/completed') {
+    if (method === 'item/started') {
+      task.current = describeItem(params.item || {});
+    } else if (method === 'item/completed') {
       const item = params.item || {};
-      if (item.type === 'agentMessage') task.turnMessages.push({ text: item.text ?? '', phase: item.phase });
+      task.current = null;
+      if (item.type === 'agentMessage') {
+        task.turnMessages.push({ text: item.text ?? '', phase: item.phase });
+        if (item.phase !== 'final_answer' && item.text) task.lastNote = oneLine(item.text, 160);
+      }
+      else if (item.type === 'imageGeneration') task.activity.images.push(item.savedPath || '(저장 경로 없음)');
       else if (item.type === 'commandExecution') task.activity.commands.push(String(item.command ?? '').slice(0, 200));
       else if (item.type === 'fileChange') for (const c of item.changes ?? []) task.activity.files.add(c.path);
       else if (item.type === 'webSearch') task.activity.searches.push(item.query ?? '');
@@ -280,7 +287,8 @@ class CodexAppServer {
     const task = {
       threadId, model: m.id, modelName: m.displayName, effort: eff, cwd, access, sandboxPolicy, subagents, instructions,
       status: 'idle', turnId: null, turnMessages: [], lastMessage: '', error: null, rerouted: null,
-      activity: { commands: [], files: new Set(), searches: [], tools: [], subagents: [], declined: [], reviews: {} },
+      current: null, lastNote: '',
+      activity: { commands: [], files: new Set(), searches: [], tools: [], subagents: [], declined: [], reviews: {}, images: [] },
       waiters: [], loaded: true, turns: 0, startedAt: Date.now(),
     };
     this.tasks.set(threadId, task);
@@ -311,6 +319,8 @@ class CodexAppServer {
     task.status = 'running';
     task.error = null;
     task.turnMessages = [];
+    task.current = null;
+    task.lastNote = '';
     task.turns += 1;
     const res = await this.request('turn/start', {
       threadId: task.threadId, model: task.model, effort, sandboxPolicy: task.sandboxPolicy,
@@ -342,6 +352,36 @@ class CodexAppServer {
 // ---------------------------------------------------------------------------
 // 결과를 Claude가 읽기 좋은 텍스트로
 // ---------------------------------------------------------------------------
+function oneLine(s, max) {
+  const t = String(s).replace(/\s+/g, ' ').trim();
+  return t.length > max ? t.slice(0, max - 1) + '…' : t;
+}
+
+// 진행 중인 항목을 사람이 읽는 한 줄로
+function describeItem(item) {
+  switch (item.type) {
+    case 'imageGeneration': return '이미지 생성 중';
+    case 'commandExecution': return `명령 실행 중: ${oneLine(item.command ?? '', 80)}`;
+    case 'fileChange': return '파일 수정 중';
+    case 'webSearch': return '웹 검색 중';
+    case 'mcpToolCall': return `도구 호출 중: ${item.server}.${item.tool}`;
+    case 'reasoning': return '생각 중';
+    case 'agentMessage': return '메시지 작성 중';
+    case 'imageView': return '이미지 확인 중';
+    default: return null;
+  }
+}
+
+// 작업 중일 때 보여 줄 진행 상황 한 줄
+function progressLine(task) {
+  const parts = [];
+  if (task.activity.images.length) parts.push(`이미지 ${task.activity.images.length}장 생성됨`);
+  if (task.activity.files.size) parts.push(`파일 ${task.activity.files.size}개 변경`);
+  if (task.current) parts.push(task.current);
+  if (task.lastNote) parts.push(`최근 메시지: "${task.lastNote}"`);
+  return parts.join(' · ');
+}
+
 function formatTask(task) {
   const a = task.activity;
   const secs = Math.round((Date.now() - task.startedAt) / 1000);
@@ -363,6 +403,7 @@ function formatTask(task) {
   if (a.searches.length) act.push(`웹 검색 ${a.searches.length}회`);
   if (a.commands.length) act.push(`명령 실행 ${a.commands.length}회`);
   if (a.files.size) act.push(`변경 파일: ${[...a.files].join(', ')}`);
+  if (a.images.length) act.push(`생성 이미지 ${a.images.length}장: ${a.images.join(', ')}`);
   if (a.subagents.length) act.push(`서브에이전트 ${a.subagents.length}개 (${a.subagents.join(', ')})`);
   if (a.tools.length) act.push(`플러그인·도구 호출 ${a.tools.length}회 (${[...new Set(a.tools)].join(', ')})`);
   const reviewNames = { approved: '허용', denied: '거절', timedOut: '시간 초과', aborted: '중단' };
@@ -372,7 +413,10 @@ function formatTask(task) {
   if (act.length) lines.push(`활동: ${act.join(' · ')}`);
   if (task.rerouted) lines.push(`⚠ 서버가 모델을 변경했습니다: ${JSON.stringify(task.rerouted)}`);
   if (task.error) lines.push(`오류: ${task.error}`);
-  if (task.status !== 'running') {
+  if (task.status === 'running') {
+    const p = progressLine(task);
+    if (p) lines.push(`진행: ${p}`);
+  } else {
     lines.push('', '----- 작업 모델의 메시지 -----', task.lastMessage || '(메시지 없음)');
   }
   return lines.join('\n');
@@ -390,7 +434,7 @@ const INSTRUCTIONS = `codex 서버는 사용자의 ChatGPT(Codex) OAuth 로그�
 2. codex_start로 맡긴다. prompt는 작업 모델이 그것만 읽고 이해할 수 있게 목표, 필요한 배경, 범위, 결과 형식, 완료 기준을 담아 새로 쓴다. 사용자와의 대화 전체나 관계없는 개인 정보는 붙이지 않는다. cwd는 작업할 폴더(현재 프로젝트 등)를 절대 경로로 준다.
 3. 추론 수준을 사용자가 맡기면 직접 고른다: 단순 조회·요약 low, 일반 작업 medium, 복잡한 분석·코딩 high, 매우 어려운 문제 xhigh 이상. 고른 이유를 사용자에게 한 줄로 알린다.
 4. 결과 상태가 question이면 원래 사용자 요청을 근거로 직접 결정해 codex_reply로 답한다. 사용자의 취향, 비용, 작업 범위 확대처럼 사용자만 정할 수 있는 것만 사용자에게 묻는다.
-5. running이면 codex_wait로 계속 기다린다. done이면 결과를 검토하고, 부족하면 codex_reply로 보완을 요청한다.
+5. 이미지 생성처럼 몇 분 걸리는 작업은 waitSeconds를 120~180초로 짧게 잡는다. running이면 결과의 "진행:" 줄(생성된 이미지 수, 현재 단계)을 사용자에게 한 줄로 알리고 codex_wait로 이어서 기다린다. 파일이 먼저 생겨도 작업 모델이 검토·기록을 마칠 때까지는 running이다. done이면 결과를 검토하고, 부족하면 codex_reply로 보완을 요청한다.
 6. 끝나면 사용자에게 보고한다: 맡긴 모델과 추론 수준, 보낸 프롬프트 요지, 오간 질문과 답, 최종 결과, 생성된 파일, 서브에이전트를 썼다면 그 구성.
 권한(access): 기본은 workspace(cwd 안에서만 수정, 네트워크·플러그인 사용 가능). 작업 폴더 밖 접근 등은 Codex의 자동 검토(auto_review)가 사용자 대신 승인하거나 거절한다. 조사·검토만 필요하면 read-only. full(컴퓨터 전체)은 사용자가 명시적으로 요청할 때만 쓴다.
 병렬 작업(subagents): 작업을 독립적인 여러 갈래로 나눌 수 있어 동시에 처리하면 빨라지거나, 사용자가 병렬/서브에이전트를 요청하면 subagents=true로 맡긴다. 이때는 상위 모델(Astra 또는 Sol)과 high 이상의 추론 수준을 쓰는 것을 기본으로 한다(ultra는 모델이 스스로 적극적으로 서브에이전트를 쓴다). 구조는 사용자 → Claude(총괄) → 상위 모델(팀장) → 서브에이전트들이다. 서브에이전트는 Claude와 직접 대화하지 않고, 팀장 모델이 결과를 모아 보고한다.
@@ -407,9 +451,10 @@ function progressTicker(extra, task) {
   let n = 0;
   return () => {
     n += 1;
+    const p = progressLine(task);
     extra.sendNotification({
       method: 'notifications/progress',
-      params: { progressToken: token, progress: n, message: `${task.modelName ?? task.model} 작업 중… (${n * 15}초)` },
+      params: { progressToken: token, progress: n, message: `${task.modelName ?? task.model} 작업 중… (${n * 15}초)${p ? ` · ${p}` : ''}` },
     }).catch(() => {});
   };
 }
