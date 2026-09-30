@@ -9,6 +9,7 @@ import readline from 'node:readline';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { startViewer, VIEWER_URL } from './viewer.mjs';
 
 const VERSION = '0.1.0';
 
@@ -262,6 +263,17 @@ class CodexAppServer {
     if (exact) return exact;
     const hits = models.filter((m) => m.id.toLowerCase().includes(n) || m.displayName?.toLowerCase().includes(n));
     if (hits.length === 1) return hits[0];
+    // 별칭(예: "sol")이 여러 버전에 걸리면 버전 번호가 가장 높은 모델을 고른다
+    if (hits.length > 1) {
+      const ver = (m) => (m.id.match(/\d+(?:\.\d+)*/)?.[0] ?? '0').split('.').map(Number);
+      const cmp = (a, b) => {
+        const x = ver(a), y = ver(b);
+        for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (y[i] ?? 0) - (x[i] ?? 0);
+        return 0;
+      };
+      const sorted = [...hits].sort(cmp);
+      if (cmp(sorted[0], sorted[1]) !== 0) return sorted[0];
+    }
     const list = models.map((m) => m.id).join(', ');
     if (hits.length === 0) throw new Error(`'${name}' 모델을 찾을 수 없습니다. 사용 가능: ${list}. 다른 모델로 임의 대체하지 않습니다.`);
     throw new Error(`'${name}'에 해당하는 모델이 여러 개입니다: ${hits.map((m) => m.id).join(', ')}. 정확한 ID를 지정하세요.`);
@@ -398,6 +410,7 @@ function formatTask(task) {
     `권한: ${task.access}${task.subagents ? ' · 서브에이전트 사용' : ''}`,
     `상태: ${statusText}`,
     `경과: ${secs}초 · 주고받은 차례: ${task.turns}`,
+    `작업 화면: ${VIEWER_URL}#${task.threadId}`,
   ];
   const act = [];
   if (a.searches.length) act.push(`웹 검색 ${a.searches.length}회`);
@@ -427,15 +440,16 @@ function formatTask(task) {
 // ---------------------------------------------------------------------------
 const codex = new CodexAppServer(findCodex());
 
-const INSTRUCTIONS = `codex 서버는 사용자의 ChatGPT(Codex) OAuth 로그인으로 OpenAI 모델(예: Luna=gpt-5.6-luna, Sol=gpt-5.6-sol, Terra, Astra)에게 일을 맡기는 도구다.
+const INSTRUCTIONS = `codex 서버는 사용자의 ChatGPT(Codex) OAuth 로그인으로 OpenAI 모델(Luna, Sol, Terra, Astra 등 계열)에게 일을 맡기는 도구다.
 사용 시점: 사용자가 "루나/솔 등에게 맡겨"처럼 위임을 직접 지시했을 때. 사용자가 시키지 않았는데 먼저 위임하려면 먼저 사용자에게 제안하고 허락을 받는다.
 진행 방법:
-1. 필요하면 codex_models로 실제 모델 ID와 지원 추론 수준을 확인한다.
-2. codex_start로 맡긴다. prompt는 작업 모델이 그것만 읽고 이해할 수 있게 목표, 필요한 배경, 범위, 결과 형식, 완료 기준을 담아 새로 쓴다. 사용자와의 대화 전체나 관계없는 개인 정보는 붙이지 않는다. cwd는 작업할 폴더(현재 프로젝트 등)를 절대 경로로 준다.
-3. 추론 수준을 사용자가 맡기면 직접 고른다: 단순 조회·요약 low, 일반 작업 medium, 복잡한 분석·코딩 high, 매우 어려운 문제 xhigh 이상. 고른 이유를 사용자에게 한 줄로 알린다.
-4. 결과 상태가 question이면 원래 사용자 요청을 근거로 직접 결정해 codex_reply로 답한다. 사용자의 취향, 비용, 작업 범위 확대처럼 사용자만 정할 수 있는 것만 사용자에게 묻는다.
-5. 이미지 생성처럼 몇 분 걸리는 작업은 waitSeconds를 120~180초로 짧게 잡는다. running이면 결과의 "진행:" 줄(생성된 이미지 수, 현재 단계)을 사용자에게 한 줄로 알리고 codex_wait로 이어서 기다린다. 파일이 먼저 생겨도 작업 모델이 검토·기록을 마칠 때까지는 running이다. done이면 결과를 검토하고, 부족하면 codex_reply로 보완을 요청한다.
-6. 끝나면 사용자에게 보고한다: 맡긴 모델과 추론 수준, 보낸 프롬프트 요지, 오간 질문과 답, 최종 결과, 생성된 파일, 서브에이전트를 썼다면 그 구성.
+1. 먼저 codex_models로 실제 모델 ID와 지원 추론 수준을 확인한다. 같은 계열(Sol, Astra, Terra, Luna 등)에서는 항상 버전이 가장 높은 최신 모델을 쓴다. 사용자가 정확한 버전을 지정했을 때만 그 버전을 쓴다. 계열 이름만 주면(예: "sol") 서버가 최신 버전을 자동으로 고른다.
+2. 작업 화면: ${VIEWER_URL} 에서 사용자가 지시문, Codex의 진행(명령·파일 변경·검색·메시지), 질문과 답, 최종 보고를 실시간으로 볼 수 있다. codex_start를 부르기 직전에(같은 차례에 함께) 앱의 브라우저 창으로 이 주소를 열어 준다. 이미 열려 있으면 다시 열지 않는다. 화면은 가장 최근 작업을 자동으로 따라간다.
+3. codex_start로 맡긴다. prompt는 작업 모델이 그것만 읽고 이해할 수 있게 목표, 필요한 배경, 범위, 결과 형식, 완료 기준을 담아 새로 쓴다. 사용자와의 대화 전체나 관계없는 개인 정보는 붙이지 않는다. cwd는 작업할 폴더(현재 프로젝트 등)를 절대 경로로 준다.
+4. 추론 수준을 사용자가 맡기면 직접 고른다: 단순 조회·요약 low, 일반 작업 medium, 복잡한 분석·코딩 high, 매우 어려운 문제 xhigh 이상. 고른 이유를 사용자에게 한 줄로 알린다.
+5. 결과 상태가 question이면 원래 사용자 요청을 근거로 직접 결정해 codex_reply로 답한다. 사용자의 취향, 비용, 작업 범위 확대처럼 사용자만 정할 수 있는 것만 사용자에게 묻는다.
+6. 이미지 생성처럼 몇 분 걸리는 작업은 waitSeconds를 120~180초로 짧게 잡는다. running이면 결과의 "진행:" 줄(생성된 이미지 수, 현재 단계)을 사용자에게 한 줄로 알리고 codex_wait로 이어서 기다린다. 파일이 먼저 생겨도 작업 모델이 검토·기록을 마칠 때까지는 running이다. done이면 결과를 검토하고, 부족하면 codex_reply로 보완을 요청한다.
+7. 끝나면 사용자에게 보고한다: 맡긴 모델과 추론 수준, 보낸 프롬프트 요지, 오간 질문과 답, 최종 결과, 생성된 파일, 서브에이전트를 썼다면 그 구성.
 권한(access): 기본은 workspace(cwd 안에서만 수정, 네트워크·플러그인 사용 가능). 작업 폴더 밖 접근 등은 Codex의 자동 검토(auto_review)가 사용자 대신 승인하거나 거절한다. 조사·검토만 필요하면 read-only. full(컴퓨터 전체)은 사용자가 명시적으로 요청할 때만 쓴다.
 병렬 작업(subagents): 작업을 독립적인 여러 갈래로 나눌 수 있어 동시에 처리하면 빨라지거나, 사용자가 병렬/서브에이전트를 요청하면 subagents=true로 맡긴다. 이때는 상위 모델(Astra 또는 Sol)과 high 이상의 추론 수준을 쓰는 것을 기본으로 한다(ultra는 모델이 스스로 적극적으로 서브에이전트를 쓴다). 구조는 사용자 → Claude(총괄) → 상위 모델(팀장) → 서브에이전트들이다. 서브에이전트는 Claude와 직접 대화하지 않고, 팀장 모델이 결과를 모아 보고한다.
 지킬 것: 사용자가 지정한 모델을 다른 모델로 바꾸지 않는다. 로그인 오류나 한도 소진이 생기면 API 키 등 다른 경로로 우회하지 말고 사용자에게 알린다.`;
@@ -486,7 +500,7 @@ server.registerTool('codex_start', {
   title: 'Codex 모델에게 작업 맡기기',
   description: '새 Codex 작업을 시작한다. 작업 모델이 끝내거나 질문하면 결과를 돌려준다. 상태가 question이면 codex_reply로 답하고, running이면 codex_wait로 기다린다.',
   inputSchema: {
-    model: z.string().describe('모델 ID 또는 별칭. 예: "luna", "sol", "gpt-5.6-luna"'),
+    model: z.string().describe('모델 ID 또는 계열 별칭. 예: "sol", "astra" (별칭은 해당 계열의 최신 버전으로 해석됨)'),
     effort: z.string().optional().describe('추론 수준. 예: low, medium, high, xhigh, max. 생략하면 모델 기본값'),
     prompt: z.string().min(1).describe('작업 모델에게 보낼 독립적인 작업 지시문'),
     cwd: z.string().describe('작업 폴더 절대 경로 (작업 모델의 기본 작업 위치)'),
@@ -547,4 +561,5 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { codex
 process.stdin.on('close', () => { codex.shutdown(); process.exit(0); });
 process.on('exit', () => codex.shutdown());
 
+startViewer();
 await server.connect(new StdioServerTransport());
