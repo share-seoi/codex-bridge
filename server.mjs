@@ -23,7 +23,9 @@ function findCodex() {
   if (!IS_WIN) {
     candidates.push(
       '/Applications/ChatGPT.app/Contents/Resources/codex',
+      '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex',
       '/Applications/Codex.app/Contents/Resources/codex',
+      '/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex',
     );
   }
   try {
