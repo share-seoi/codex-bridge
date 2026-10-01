@@ -55,7 +55,7 @@ npm i -g @openai/codex
 # 3) ChatGPT 계정으로 로그인 (브라우저가 열림, 한 번만)
 codex login
 
-# 4) 받아서 설치 (비공개 저장소라 처음엔 GitHub 로그인 창이 뜸)
+# 4) 받아서 설치
 git clone https://github.com/rlaehrb1/codex-bridge.git $HOME\codex-bridge
 cd $HOME\codex-bridge
 npm ci
@@ -101,6 +101,14 @@ Claude 앱을 다시 시작하면 끝.
 사용자 대신 위험도를 판단해 허용하거나 거절한다. 결과는 보고서의 "자동 승인 검토"에 표시된다.
 
 구조: 나 → Claude(총괄) → 상위 모델(팀장) → 서브에이전트들
+
+## 작업 화면
+
+브리지가 켜져 있으면 http://127.0.0.1:4390/ 에서 Claude가 맡긴 작업을 대화 형태로 실시간으로 볼 수 있다.
+Claude의 지시, Codex의 중간 보고·질문·최종 보고가 보이고, 가장 최근 작업을 자동으로 따라간다.
+
+- Codex가 `~/.codex/sessions`에 남기는 기록을 읽기만 한다. 작업에는 영향을 주지 않는다.
+- 이 PC 안(127.0.0.1)에서만 열린다. 포트는 환경 변수 `CODEX_BRIDGE_VIEWER_PORT`로 바꿀 수 있다.
 
 ## 관리 / 문제 해결
 

@@ -372,7 +372,13 @@ function sendJson(res, obj) {
   res.end(JSON.stringify(obj));
 }
 
+// 다른 웹사이트가 DNS 리바인딩으로 이 화면의 기록을 읽어가지 못하게, 이 주소로 들어온 요청만 받는다.
+const ALLOWED_HOSTS = new Set([`${HOST}:${PORT}`, `localhost:${PORT}`]);
+
 async function handle(req, res) {
+  if (!ALLOWED_HOSTS.has(String(req.headers.host ?? '').toLowerCase())) {
+    res.writeHead(403); return res.end('forbidden');
+  }
   const url = new URL(req.url, VIEWER_URL);
   try {
     if (url.pathname === '/') {
