@@ -29,7 +29,7 @@ npm i -g @openai/codex
 codex login
 
 # 4) 받아서 설치
-git clone https://github.com/rlaehrb1/codex-bridge.git ~/codex-bridge
+git clone https://github.com/share-seoi/codex-bridge.git ~/codex-bridge
 cd ~/codex-bridge
 npm ci
 
@@ -56,7 +56,7 @@ npm i -g @openai/codex
 codex login
 
 # 4) 받아서 설치
-git clone https://github.com/rlaehrb1/codex-bridge.git $HOME\codex-bridge
+git clone https://github.com/share-seoi/codex-bridge.git $HOME\codex-bridge
 cd $HOME\codex-bridge
 npm ci
 
