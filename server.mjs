@@ -4,7 +4,9 @@
 // 인증은 Codex가 관리하는 ChatGPT 로그인만 사용한다. API 키는 쓰지 않는다.
 
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, statSync, mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import readline from 'node:readline';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -59,15 +61,73 @@ Parallel work (sub-agents):
 - Sub-agents cannot reach the manager. Resolve their questions yourself; escalate to the manager with a "QUESTION:" line only when the decision is truly the user's.
 - Wait for all sub-agents, then review, merge and verify their results yourself before the final report. In the report, list each sub-agent's role, model and outcome.`;
 
+// 작업 폴더가 브릿지 폴더이고 실제 작업 대상이 다른 폴더일 때 붙는 안내
+function targetRules(target) {
+  return `
+
+Target folder:
+- The actual target of this task is ${target}. Your working directory is only the home for this conversation; do not do the task there.
+- Before starting, read ${path.join(target, 'AGENTS.md')} if it exists and follow it.
+- Run commands from the target folder (cd into it or set the command's working directory) and use absolute paths for files.
+- Unless the task says otherwise, create new files inside the target folder.`;
+}
+
 // 작업별 권한 수준. 모든 수준에서 네트워크 접속은 허용한다.
 const ACCESS_LEVELS = {
   full: () => ({ sandbox: 'danger-full-access', sandboxPolicy: { type: 'dangerFullAccess' } }),
-  workspace: (cwd) => ({
+  workspace: (roots) => ({
     sandbox: 'workspace-write',
-    sandboxPolicy: { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: true },
+    sandboxPolicy: { type: 'workspaceWrite', writableRoots: roots, networkAccess: true },
   }),
   'read-only': () => ({ sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: true } }),
 };
+
+// ---------------------------------------------------------------------------
+// 브릿지 폴더: 모든 위임 대화의 작업 폴더. Codex 앱에 프로젝트로 추가해 두면 브릿지 대화가 거기에 모인다.
+// 작업 기록(.codex-bridge/tasks/<작업 ID>.json)도 여기에 남겨, Claude 세션이 바뀌어도 이어갈 수 있게 한다.
+// ---------------------------------------------------------------------------
+const BRIDGE_HOME = path.resolve(process.env.CODEX_BRIDGE_HOME || path.join(os.homedir(), 'Documents', 'bridge'));
+const TASKS_DIR = path.join(BRIDGE_HOME, '.codex-bridge', 'tasks');
+
+const IDLE_SHUTDOWN_MS = Number(process.env.CODEX_BRIDGE_IDLE_MS) || 2 * 60_000;
+
+const RECORD_FIELDS = ['threadId', 'name', 'model', 'modelName', 'effort', 'cwd', 'target', 'access', 'subagents', 'status', 'turns', 'startedAt'];
+
+function saveRecord(task) {
+  try {
+    mkdirSync(TASKS_DIR, { recursive: true });
+    const rec = Object.fromEntries(RECORD_FIELDS.map((k) => [k, task[k]]));
+    rec.updatedAt = Date.now();
+    const file = path.join(TASKS_DIR, `${task.threadId}.json`);
+    writeFileSync(`${file}.tmp`, JSON.stringify(rec, null, 2));
+    renameSync(`${file}.tmp`, file);
+  } catch {} // 기록 실패가 작업을 막지 않게 한다
+}
+
+function loadRecord(threadId) {
+  if (!/^[\w-]+$/.test(threadId)) return null;
+  try { return JSON.parse(readFileSync(path.join(TASKS_DIR, `${threadId}.json`), 'utf8')); } catch { return null; }
+}
+
+function listRecords() {
+  let names = [];
+  try { names = readdirSync(TASKS_DIR).filter((n) => n.endsWith('.json')); } catch { return []; }
+  return names.map((n) => loadRecord(n.slice(0, -5))).filter(Boolean).sort((a, b) => b.startedAt - a.startedAt);
+}
+
+// Codex 앱 목록에 보일 대화 제목: [대상 폴더 이름] 지시문 첫 줄
+function taskName(target, prompt) {
+  const first = String(prompt).split(/\r?\n/).find((l) => l.trim()) ?? '';
+  return `[${path.basename(target) || target}] ${oneLine(first, 60)}`;
+}
+
+// 같은 폴더인지 비교한다. path.relative는 Windows에서 대소문자·구분자 차이를 무시한다.
+const samePath = (a, b) => path.relative(a, b) === '';
+const writableRoots = (cwd, target) => (samePath(cwd, target) ? [cwd] : [cwd, target]);
+
+function workerInstructions({ cwd, target, subagents }) {
+  return WORKER_RULES + (samePath(cwd, target) ? '' : targetRules(target)) + (subagents ? SUBAGENT_RULES : '');
+}
 
 // ---------------------------------------------------------------------------
 // Codex App Server 클라이언트 (JSON-RPC over stdio)
@@ -85,6 +145,7 @@ class CodexAppServer {
   }
 
   ensure() {
+    this.#scheduleIdle(); // 호출이 있을 때마다 대기 시간을 다시 잰다
     if (this.proc && this.proc.exitCode === null && this.ready) return this.ready;
     this.ready = this.#start();
     return this.ready;
@@ -110,7 +171,11 @@ class CodexAppServer {
       for (const { reject } of this.pending.values()) reject(new Error(`Codex 서버가 종료되었습니다 (code ${code})`));
       this.pending.clear();
       for (const t of this.tasks.values()) {
-        if (t.status === 'running') { t.status = 'failed'; t.error = 'Codex 서버가 작업 도중 종료되었습니다.'; this.#wake(t); }
+        if (t.status === 'running') {
+          t.status = 'failed'; t.error = 'Codex 서버가 작업 도중 종료되었습니다.';
+          saveRecord(t);
+          this.#wake(t);
+        }
         t.loaded = false;
       }
       this.proc = null;
@@ -233,13 +298,27 @@ class CodexAppServer {
         task.status = 'failed';
         task.error = turn.error?.message ?? JSON.stringify(turn.error ?? turn.status);
       }
+      saveRecord(task);
       this.#wake(task);
+      this.#scheduleIdle();
     } else if (method === 'error') {
       task.error = params.error?.message ?? JSON.stringify(params);
     }
   }
 
   #wake(task) { for (const w of task.waiters.splice(0)) w(); }
+
+  // 진행 중인 작업이 없으면 잠시 뒤 Codex를 끈다. 켜 둔 Codex는 끝난 대화도 계속 붙잡고 있어서
+  // (thread/unsubscribe로도 풀리지 않음) Claude 세션이 열려 있는 동안 Codex 앱에서 그 대화가 묶인다.
+  // 다음 호출 때 ensure()가 다시 켜고, 이어서 지시하면 reply()가 thread/resume으로 불러온다.
+  #scheduleIdle() {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      if ([...this.tasks.values()].some((t) => t.status === 'running')) return;
+      this.shutdown();
+    }, IDLE_SHUTDOWN_MS);
+    this.idleTimer.unref();
+  }
 
   waitForTurn(task, seconds, onTick) {
     if (task.status !== 'running') return Promise.resolve();
@@ -281,7 +360,7 @@ class CodexAppServer {
     throw new Error(`'${name}'에 해당하는 모델이 여러 개입니다: ${hits.map((m) => m.id).join(', ')}. 정확한 ID를 지정하세요.`);
   }
 
-  async startTask({ model, effort, prompt, cwd, access, subagents }) {
+  async startTask({ model, effort, prompt, target, inPlace, access, subagents }) {
     await this.ensure();
     const m = await this.resolveModel(model);
     const efforts = (m.supportedReasoningEfforts ?? []).map((e) => e.reasoningEffort ?? e);
@@ -289,8 +368,10 @@ class CodexAppServer {
     if (effort && !efforts.includes(effort)) {
       throw new Error(`${m.id}은(는) 추론 수준 '${effort}'을(를) 지원하지 않습니다. 지원: ${efforts.join(', ')}`);
     }
-    const { sandbox, sandboxPolicy } = ACCESS_LEVELS[access](cwd);
-    const instructions = WORKER_RULES + (subagents ? SUBAGENT_RULES : '');
+    const cwd = inPlace ? target : BRIDGE_HOME;
+    if (!inPlace) mkdirSync(BRIDGE_HOME, { recursive: true });
+    const { sandbox, sandboxPolicy } = ACCESS_LEVELS[access](writableRoots(cwd, target));
+    const instructions = workerInstructions({ cwd, target, subagents });
     const res = await this.request('thread/start', {
       // 샌드박스 밖 동작·네트워크 차단·플러그인 확인은 사용자 대신 Codex 자동 검토(auto_review)가 판단한다.
       cwd, model: m.id, sandbox, approvalPolicy: 'on-request', approvalsReviewer: 'auto_review',
@@ -298,8 +379,10 @@ class CodexAppServer {
       serviceName: 'codex-bridge',
     });
     const threadId = res.thread.id;
+    const name = taskName(target, prompt);
+    await this.request('thread/name/set', { threadId, name }).catch(() => {});
     const task = {
-      threadId, model: m.id, modelName: m.displayName, effort: eff, cwd, access, sandboxPolicy, subagents, instructions,
+      threadId, name, model: m.id, modelName: m.displayName, effort: eff, cwd, target, access, sandboxPolicy, subagents, instructions,
       status: 'idle', turnId: null, turnMessages: [], lastMessage: '', error: null, rerouted: null,
       current: null, lastNote: '',
       activity: { commands: [], files: new Set(), searches: [], tools: [], subagents: [], declined: [], reviews: {}, images: [] },
@@ -307,16 +390,38 @@ class CodexAppServer {
     };
     this.tasks.set(threadId, task);
     await this.#runTurn(task, prompt, eff);
+    saveRecord(task);
+    return task;
+  }
+
+  // 다른 Claude 세션에서 시작한 작업을 기록에서 되살린다
+  #restore(threadId) {
+    const rec = loadRecord(threadId);
+    if (!rec) return null;
+    const target = rec.target ?? rec.cwd;
+    const task = {
+      ...rec, target,
+      status: rec.status === 'running' ? 'idle' : rec.status,
+      sandboxPolicy: ACCESS_LEVELS[rec.access](writableRoots(rec.cwd, target)).sandboxPolicy,
+      instructions: workerInstructions({ cwd: rec.cwd, target, subagents: rec.subagents }),
+      turnId: null, turnMessages: [], lastMessage: '', error: null, rerouted: null, current: null, lastNote: '',
+      activity: { commands: [], files: new Set(), searches: [], tools: [], subagents: [], declined: [], reviews: {}, images: [] },
+      waiters: [], loaded: false,
+    };
+    this.tasks.set(threadId, task);
     return task;
   }
 
   async reply(threadId, message, effort) {
     await this.ensure();
-    let task = this.tasks.get(threadId);
-    if (!task) throw new Error(`작업 ${threadId}을(를) 찾을 수 없습니다. (이 Claude 세션에서 시작한 작업만 이어갈 수 있습니다)`);
+    const task = this.tasks.get(threadId) ?? this.#restore(threadId);
+    if (!task) throw new Error(`작업 ${threadId}을(를) 찾을 수 없습니다. codex_tasks로 작업 목록을 확인하세요.`);
     if (task.status === 'running') throw new Error('작업 모델이 아직 작업 중입니다. codex_wait로 결과를 먼저 받으세요.');
     if (!task.loaded) {
-      await this.request('thread/resume', { threadId, developerInstructions: task.instructions });
+      await this.request('thread/resume', {
+        threadId, developerInstructions: task.instructions,
+        approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', excludeTurns: true,
+      });
       task.loaded = true;
     }
     if (effort) {
@@ -326,6 +431,7 @@ class CodexAppServer {
       task.effort = effort;
     }
     await this.#runTurn(task, message, task.effort);
+    saveRecord(task);
     return task;
   }
 
@@ -410,6 +516,7 @@ function formatTask(task) {
     `작업 ID: ${task.threadId}`,
     `모델: ${task.modelName ?? task.model} (${task.model}) · 추론 수준: ${task.effort}`,
     `권한: ${task.access}${task.subagents ? ' · 서브에이전트 사용' : ''}`,
+    `작업 대상: ${task.target}${samePath(task.cwd, task.target) ? ' (작업 폴더로 직접 사용)' : ` · 대화 위치: ${task.cwd}`}`,
     `상태: ${statusText}`,
     `경과: ${secs}초 · 주고받은 차례: ${task.turns}`,
     `작업 화면: ${VIEWER_URL}#${task.threadId}`,
@@ -447,12 +554,13 @@ const INSTRUCTIONS = `codex 서버는 사용자의 ChatGPT(Codex) OAuth 로그�
 진행 방법:
 1. 먼저 codex_models로 실제 모델 ID와 지원 추론 수준을 확인한다. 같은 계열(Sol, Astra, Terra, Luna 등)에서는 항상 버전이 가장 높은 최신 모델을 쓴다. 사용자가 정확한 버전을 지정했을 때만 그 버전을 쓴다. 계열 이름만 주면(예: "sol") 서버가 최신 버전을 자동으로 고른다.
 2. 작업 화면: ${VIEWER_URL} 에서 사용자가 지시문, Codex의 진행(명령·파일 변경·검색·메시지), 질문과 답, 최종 보고를 실시간으로 볼 수 있다. codex_start를 부르기 직전에(같은 차례에 함께) 앱의 브라우저 창으로 이 주소를 열어 준다. 이미 열려 있으면 다시 열지 않는다. 화면은 가장 최근 작업을 자동으로 따라간다.
-3. codex_start로 맡긴다. prompt는 작업 모델이 그것만 읽고 이해할 수 있게 목표, 필요한 배경, 범위, 결과 형식, 완료 기준을 담아 새로 쓴다. 사용자와의 대화 전체나 관계없는 개인 정보는 붙이지 않는다. cwd는 작업할 폴더(현재 프로젝트 등)를 절대 경로로 준다.
+3. codex_start로 맡긴다. prompt는 작업 모델이 그것만 읽고 이해할 수 있게 목표, 필요한 배경, 범위, 결과 형식, 완료 기준을 담아 새로 쓴다. 사용자와의 대화 전체나 관계없는 개인 정보는 붙이지 않는다. cwd는 작업 대상 폴더(현재 프로젝트 등)를 절대 경로로 준다. Codex 대화 자체는 브릿지 폴더(${BRIDGE_HOME})에서 열려 Codex 앱의 그 프로젝트에 모이고, 대상 폴더는 수정 허용 범위에 자동으로 들어간다. 대상 저장소의 코드를 크게 고쳐서 Codex가 그 폴더를 작업 폴더로 쓰는 편이 확실히 나을 때만 inPlace=true로 하고, 그 대화가 브릿지 프로젝트 밖에 생긴다고 사용자에게 알린다.
 4. 추론 수준을 사용자가 맡기면 직접 고른다: 단순 조회·요약 low, 일반 작업 medium, 복잡한 분석·코딩 high, 매우 어려운 문제 xhigh 이상. 고른 이유를 사용자에게 한 줄로 알린다.
 5. 결과 상태가 question이면 원래 사용자 요청을 근거로 직접 결정해 codex_reply로 답한다. 사용자의 취향, 비용, 작업 범위 확대처럼 사용자만 정할 수 있는 것만 사용자에게 묻는다.
 6. 이미지 생성처럼 몇 분 걸리는 작업은 waitSeconds를 120~180초로 짧게 잡는다. running이면 결과의 "진행:" 줄(생성된 이미지 수, 현재 단계)을 사용자에게 한 줄로 알리고 codex_wait로 이어서 기다린다. 파일이 먼저 생겨도 작업 모델이 검토·기록을 마칠 때까지는 running이다. done이면 결과를 검토하고, 부족하면 codex_reply로 보완을 요청한다.
 7. 끝나면 사용자에게 보고한다: 맡긴 모델과 추론 수준, 보낸 프롬프트 요지, 오간 질문과 답, 최종 결과, 생성된 파일, 서브에이전트를 썼다면 그 구성.
-권한(access): 기본은 workspace(cwd 안에서만 수정, 네트워크·플러그인 사용 가능). 작업 폴더 밖 접근 등은 Codex의 자동 검토(auto_review)가 사용자 대신 승인하거나 거절한다. 조사·검토만 필요하면 read-only. full(컴퓨터 전체)은 사용자가 명시적으로 요청할 때만 쓴다.
+이어가기: 작업 기록은 브릿지 폴더에 남는다. 다른 Claude 세션에서 시작한 작업도 codex_tasks로 찾아 codex_reply로 이어갈 수 있다.
+권한(access): 기본은 workspace(대상 폴더와 브릿지 폴더 안에서만 수정, 네트워크·플러그인 사용 가능). 작업 폴더 밖 접근 등은 Codex의 자동 검토(auto_review)가 사용자 대신 승인하거나 거절한다. 조사·검토만 필요하면 read-only. full(컴퓨터 전체)은 사용자가 명시적으로 요청할 때만 쓴다.
 병렬 작업(subagents): 작업을 독립적인 여러 갈래로 나눌 수 있어 동시에 처리하면 빨라지거나, 사용자가 병렬/서브에이전트를 요청하면 subagents=true로 맡긴다. 이때는 상위 모델(Astra 또는 Sol)과 high 이상의 추론 수준을 쓰는 것을 기본으로 한다(ultra는 모델이 스스로 적극적으로 서브에이전트를 쓴다). 구조는 사용자 → Claude(총괄) → 상위 모델(팀장) → 서브에이전트들이다. 서브에이전트는 Claude와 직접 대화하지 않고, 팀장 모델이 결과를 모아 보고한다.
 지킬 것: 사용자가 지정한 모델을 다른 모델로 바꾸지 않는다. 로그인 오류나 한도 소진이 생기면 API 키 등 다른 경로로 우회하지 말고 사용자에게 알린다.`;
 
@@ -505,17 +613,19 @@ server.registerTool('codex_start', {
     model: z.string().describe('모델 ID 또는 계열 별칭. 예: "sol", "astra" (별칭은 해당 계열의 최신 버전으로 해석됨)'),
     effort: z.string().optional().describe('추론 수준. 예: low, medium, high, xhigh, max. 생략하면 모델 기본값'),
     prompt: z.string().min(1).describe('작업 모델에게 보낼 독립적인 작업 지시문'),
-    cwd: z.string().describe('작업 폴더 절대 경로 (작업 모델의 기본 작업 위치)'),
+    cwd: z.string().describe('작업 대상 폴더 절대 경로. Codex 대화는 브릿지 폴더에서 열리고, 이 폴더는 수정 허용 범위에 들어간다'),
+    inPlace: z.boolean().optional()
+      .describe('true면 대상 폴더를 Codex의 작업 폴더로 직접 쓴다(대화가 브릿지 프로젝트 밖에 생김). 저장소 코드를 크게 고칠 때만'),
     access: z.enum(['workspace', 'read-only', 'full']).optional()
-      .describe('workspace(기본): cwd 안에서만 수정, 네트워크 허용, 그 밖의 동작은 자동 검토 후 승인/거절. read-only: 수정 불가. full: 컴퓨터 전체 접근(사용자가 명시적으로 요청할 때만)'),
+      .describe('workspace(기본): 대상 폴더와 브릿지 폴더 안에서만 수정, 네트워크 허용, 그 밖의 동작은 자동 검토 후 승인/거절. read-only: 수정 불가. full: 컴퓨터 전체 접근(사용자가 명시적으로 요청할 때만)'),
     subagents: z.boolean().optional()
       .describe('true면 작업 모델에게 서브에이전트로 일을 나눠 병렬 처리하라는 지침을 준다. 상위 모델(astra, sol)과 함께 쓰는 것을 권장'),
     waitSeconds: waitField,
   },
-}, async ({ model, effort, prompt, cwd, access = 'workspace', subagents = false, waitSeconds = 240 }, extra) => {
+}, async ({ model, effort, prompt, cwd, inPlace = false, access = 'workspace', subagents = false, waitSeconds = 240 }, extra) => {
   try {
-    if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`작업 폴더가 없습니다: ${cwd}`);
-    const task = await codex.startTask({ model, effort, prompt, cwd, access, subagents });
+    if (!path.isAbsolute(cwd) || !existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`작업 대상 폴더가 없습니다: ${cwd}`);
+    const task = await codex.startTask({ model, effort, prompt, target: path.resolve(cwd), inPlace, access, subagents });
     await codex.waitForTurn(task, waitSeconds, progressTicker(extra, task));
     return text(formatTask(task));
   } catch (e) { return fail(e); }
@@ -545,9 +655,30 @@ server.registerTool('codex_wait', {
 }, async ({ taskId, waitSeconds = 240 }, extra) => {
   try {
     const task = codex.tasks.get(taskId);
-    if (!task) throw new Error(`작업 ${taskId}을(를) 찾을 수 없습니다.`);
+    if (!task) throw new Error(`이 세션에서 진행 중인 작업 ${taskId}이(가) 없습니다. 다른 세션의 작업이면 codex_tasks로 확인하고 codex_reply로 이어가세요.`);
     await codex.waitForTurn(task, waitSeconds, progressTicker(extra, task));
     return text(formatTask(task));
+  } catch (e) { return fail(e); }
+});
+
+server.registerTool('codex_tasks', {
+  title: 'Codex 작업 목록',
+  description: '브릿지 폴더에 기록된 최근 Codex 작업 목록을 보여준다. 다른 Claude 세션에서 시작한 작업도 여기서 찾아 codex_reply로 이어갈 수 있다.',
+  inputSchema: {
+    target: z.string().optional().describe('이 대상 폴더의 작업만 보기 (절대 경로)'),
+    limit: z.number().int().min(1).max(100).optional().describe('최대 개수 (기본 20)'),
+  },
+}, async ({ target, limit = 20 }) => {
+  try {
+    const recs = listRecords().filter((r) => !target || samePath(target, r.target ?? r.cwd)).slice(0, limit);
+    if (!recs.length) return text(`기록된 작업이 없습니다. (기록 위치: ${TASKS_DIR})`);
+    const lines = recs.map((r) => {
+      const live = codex.tasks.get(r.threadId);
+      const status = live?.status ?? (r.status === 'running' ? 'running(다른 세션, 상태 확인 불가)' : r.status);
+      const when = new Date(r.updatedAt ?? r.startedAt).toLocaleString('ko-KR');
+      return `- ${r.threadId} · ${r.name} · ${r.model}/${r.effort} · ${status} · 차례 ${r.turns} · ${when}\n  대상: ${r.target ?? r.cwd}`;
+    });
+    return text([`브릿지 폴더: ${BRIDGE_HOME}`, ...lines].join('\n'));
   } catch (e) { return fail(e); }
 });
 
