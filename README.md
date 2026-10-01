@@ -104,8 +104,16 @@ Claude 앱을 다시 시작하면 끝.
 
 ## 작업 화면
 
-브리지가 켜져 있으면 http://127.0.0.1:4390/ 에서 Claude가 맡긴 작업을 대화 형태로 실시간으로 볼 수 있다.
-Claude의 지시, Codex의 중간 보고·질문·최종 보고가 보이고, 가장 최근 작업을 자동으로 따라간다.
+Claude가 작업을 맡기면 대화창에 **Codex 대화** 카드가 뜬다. **열기**를 누르면 Claude 앱 오른쪽에
+Claude와 Codex가 주고받는 대화가 실시간으로 열린다. Claude의 지시, Codex의 중간 보고·질문·최종 보고가 보이고,
+가장 최근 작업을 자동으로 따라간다. (터미널에서 쓸 때는 http://127.0.0.1:4390/ 을 브라우저로 직접 연다)
+
+<p align="center">
+  <img src="docs/images/open-in-claude.png" alt="Claude 대화창에 뜬 Codex 대화 카드와 열기 버튼" width="480"><br>
+  <sub>Claude가 작업을 맡기면 뜨는 카드 → <b>열기</b></sub><br><br>
+  <img src="docs/images/viewer-conversation.png" alt="오른쪽에 열린 작업 화면: Claude의 지시, Luna의 질문, Claude의 답이 말풍선으로 오감" width="420"><br>
+  <sub>오른쪽에 열리는 Claude ↔ Codex 대화</sub>
+</p>
 
 - Codex가 `~/.codex/sessions`에 남기는 기록을 읽기만 한다. 작업에는 영향을 주지 않는다.
 - 이 PC 안(127.0.0.1)에서만 열린다. 포트는 환경 변수 `CODEX_BRIDGE_VIEWER_PORT`로 바꿀 수 있다.
