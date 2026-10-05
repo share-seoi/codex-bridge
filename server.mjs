@@ -49,6 +49,7 @@ Rules:
 - Work autonomously. For minor choices, make a reasonable assumption and list it in your report.
 - If you reach a decision that would significantly change the result and the task description does not settle it, STOP and ask the manager. End your message with a line that starts exactly with "QUESTION:" followed by the question, concrete options (A/B/...), and your recommendation. Do not continue the work in that turn; the manager's answer will arrive as the next message.
 - When finished, give a final report: what you did, the result, absolute paths of files you created or changed, sources (URLs with access date) if you researched, and limitations. A final report must not contain a "QUESTION:" line.
+- Generated images: the image tool always saves to its own folder (generated_images). If the task asks for the image at another location, MOVE the file there (do not leave a copy behind) and put the destination's absolute path in the final report. If moving is not permitted, copy it instead and say so in the report. If no location is asked for, report the generated file's absolute path.
 - The given working directory is your main workspace. You may use any tool, plugin, network access and local file you have access to when it helps the task.
 - Reply in the same language as the task prompt.`;
 
