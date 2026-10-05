@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 const PORT = Number(process.env.CODEX_BRIDGE_VIEWER_PORT) || 4390;
 const HOST = '127.0.0.1';
 export const VIEWER_URL = `http://${HOST}:${PORT}/`;
+// CODEX_BRIDGE_WEB=0이면 웹 페이지는 내리고 JSON API(/api/...)만 연다. 다른 화면(예: Claude Code 패널)이 API를 읽을 때 쓴다.
+export const WEB_PAGE = process.env.CODEX_BRIDGE_WEB !== '0';
 
 const SESSIONS_DIR = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions');
 const LIST_DAYS = 14;      // 목록에 올릴 기간
@@ -381,6 +383,10 @@ async function handle(req, res) {
   }
   const url = new URL(req.url, VIEWER_URL);
   try {
+    if (!WEB_PAGE && !url.pathname.startsWith('/api/')) {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+      return res.end('웹 작업 화면이 꺼져 있습니다 (CODEX_BRIDGE_WEB=0). API(/api/...)만 열려 있습니다.');
+    }
     if (url.pathname === '/') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       return res.end(PAGE);

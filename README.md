@@ -133,6 +133,8 @@ Claude와 Codex가 주고받는 대화가 실시간으로 열린다. Claude의 �
 
 - Codex가 `~/.codex/sessions`에 남기는 기록을 읽기만 한다. 작업에는 영향을 주지 않는다.
 - 이 PC 안(127.0.0.1)에서만 열린다. 포트는 환경 변수 `CODEX_BRIDGE_VIEWER_PORT`로 바꿀 수 있다.
+- 다른 화면으로 진행을 볼 때는 환경 변수 `CODEX_BRIDGE_WEB=0`으로 웹 페이지를 끈다. 그러면 JSON API(`/api/threads`, `/api/thread/<id>?since=N`)만 열리고,
+  Claude에게도 브라우저를 열지 말라고 안내한다.
 
 ## 관리 / 문제 해결
 

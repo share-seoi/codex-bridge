@@ -11,7 +11,7 @@ import readline from 'node:readline';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { startViewer, VIEWER_URL } from './viewer.mjs';
+import { startViewer, VIEWER_URL, WEB_PAGE } from './viewer.mjs';
 
 const VERSION = '0.1.0';
 
@@ -519,8 +519,8 @@ function formatTask(task) {
     `작업 대상: ${task.target}${samePath(task.cwd, task.target) ? ' (작업 폴더로 직접 사용)' : ` · 대화 위치: ${task.cwd}`}`,
     `상태: ${statusText}`,
     `경과: ${secs}초 · 주고받은 차례: ${task.turns}`,
-    `작업 화면: ${VIEWER_URL}#${task.threadId}`,
   ];
+  if (WEB_PAGE) lines.push(`작업 화면: ${VIEWER_URL}#${task.threadId}`);
   const act = [];
   if (a.searches.length) act.push(`웹 검색 ${a.searches.length}회`);
   if (a.commands.length) act.push(`명령 실행 ${a.commands.length}회`);
@@ -553,7 +553,9 @@ const INSTRUCTIONS = `codex 서버는 사용자의 ChatGPT(Codex) OAuth 로그�
 사용 시점: 사용자가 "루나/솔 등에게 맡겨"처럼 위임을 직접 지시했을 때. 사용자가 시키지 않았는데 먼저 위임하려면 먼저 사용자에게 제안하고 허락을 받는다.
 진행 방법:
 1. 먼저 codex_models로 실제 모델 ID와 지원 추론 수준을 확인한다. 같은 계열(Sol, Astra, Terra, Luna 등)에서는 항상 버전이 가장 높은 최신 모델을 쓴다. 사용자가 정확한 버전을 지정했을 때만 그 버전을 쓴다. 계열 이름만 주면(예: "sol") 서버가 최신 버전을 자동으로 고른다.
-2. 작업 화면: ${VIEWER_URL} 에서 사용자가 지시문, Codex의 진행(명령·파일 변경·검색·메시지), 질문과 답, 최종 보고를 실시간으로 볼 수 있다. codex_start를 부르기 직전에(같은 차례에 함께) 앱의 브라우저 창으로 이 주소를 열어 준다. 이미 열려 있으면 다시 열지 않는다. 화면은 가장 최근 작업을 자동으로 따라간다.
+2. ${WEB_PAGE
+    ? `작업 화면: ${VIEWER_URL} 에서 사용자가 지시문, Codex의 진행(명령·파일 변경·검색·메시지), 질문과 답, 최종 보고를 실시간으로 볼 수 있다. codex_start를 부르기 직전에(같은 차례에 함께) 앱의 브라우저 창으로 이 주소를 열어 준다. 이미 열려 있으면 다시 열지 않는다. 화면은 가장 최근 작업을 자동으로 따라간다.`
+    : '작업 화면: 웹 페이지는 꺼져 있다(CODEX_BRIDGE_WEB=0). 사용자는 별도 화면(예: Claude Code 패널)으로 진행을 본다. 브라우저로 작업 화면을 열지 않는다.'}
 3. codex_start로 맡긴다. prompt는 작업 모델이 그것만 읽고 이해할 수 있게 목표, 필요한 배경, 범위, 결과 형식, 완료 기준을 담아 새로 쓴다. 사용자와의 대화 전체나 관계없는 개인 정보는 붙이지 않는다. cwd는 작업 대상 폴더(현재 프로젝트 등)를 절대 경로로 준다. Codex 대화 자체는 브릿지 폴더(${BRIDGE_HOME})에서 열려 Codex 앱의 그 프로젝트에 모이고, 대상 폴더는 수정 허용 범위에 자동으로 들어간다. 대상 저장소의 코드를 크게 고쳐서 Codex가 그 폴더를 작업 폴더로 쓰는 편이 확실히 나을 때만 inPlace=true로 하고, 그 대화가 브릿지 프로젝트 밖에 생긴다고 사용자에게 알린다.
 4. 추론 수준을 사용자가 맡기면 직접 고른다: 단순 조회·요약 low, 일반 작업 medium, 복잡한 분석·코딩 high, 매우 어려운 문제 xhigh 이상. 고른 이유를 사용자에게 한 줄로 알린다.
 5. 결과 상태가 question이면 원래 사용자 요청을 근거로 직접 결정해 codex_reply로 답한다. 사용자의 취향, 비용, 작업 범위 확대처럼 사용자만 정할 수 있는 것만 사용자에게 묻는다.
