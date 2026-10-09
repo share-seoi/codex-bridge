@@ -78,7 +78,15 @@ class Rollout {
     this.lastMessage = null;       // 목록 미리보기: { who: 'claude' | 'codex', text }
   }
 
-  async refresh() {
+  // 겹친 호출(목록 · 상세 API가 동시에 읽을 때)이 같은 바이트를 두 번 읽어 이벤트를 중복으로 넣지 않도록
+  // 진행 중인 읽기가 있으면 그 결과를 함께 기다린다
+  #refreshing = null;
+  refresh() {
+    this.#refreshing ??= this.#readNew().finally(() => { this.#refreshing = null; });
+    return this.#refreshing;
+  }
+
+  async #readNew() {
     const st = await fsp.stat(this.file);
     if (st.mtimeMs === this.mtime && st.size === this.offset) return;
     this.mtime = st.mtimeMs;
